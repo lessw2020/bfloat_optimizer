@@ -46,13 +46,11 @@ class BFF_Optimizer(Optimizer):
                 loss = closure()
 
         for group in self.param_groups:
-            params_with_grad = []
-            grads = []
-            exp_avgs = []
-            exp_avg_sqs = []
-            max_exp_avg_sqs = []
-            state_steps = []
+            
             beta1, beta2 = group['betas']
+            lr = group["lr"]
+            weight_decay = group["weight_decay"]
+            eps = group["eps"]
             
             for p in group['params']:
                 if p.grad is None:
@@ -69,6 +67,7 @@ class BFF_Optimizer(Optimizer):
                     assert p.dtype == torch.bfloat16, "BFF requires BFloat16 datatype"
                     
                     state['step'] = torch.tensor(0.)
+                    
                     # Exponential moving average of gradient values
                     state['exp_avg'] = torch.zeros_like(p, memory_format=torch.preserve_format)
                     # Exponential moving average of squared gradient values
@@ -76,12 +75,8 @@ class BFF_Optimizer(Optimizer):
                     
                     # Kahan summation - accumulated error tracker
                     state['compensation'] = torch.zeros_like(p, memory_format=torch.preserve_format)
-                    
-
-                exp_avgs.append(state['exp_avg'])
-                exp_avg_sqs.append(state['exp_avg_sq'])
-
-                state_steps.append(state['step'])
+                   
+                # main processing
                 
                 grad = p.grad
                 state['exp_avg'].mul_(beta1).add_(grad, alpha=1 - beta1)
@@ -90,9 +85,11 @@ class BFF_Optimizer(Optimizer):
                 
                 # update the steps for each param group update
                 state['step'] += 1
+                
+                # weight decay, AdamW style
+                p.data.mul_(1 - lr * weight_decay)
+                
                 denom_correction = (1 - beta2 ** state['step']) ** 0.5
-
-                lr = group['lr_function'](state['step'])
                 
                 compensation.addcdiv_(
                         state['exp_avg'],
