@@ -3,6 +3,7 @@
 
 # paper credit - "Revisiting Bfloat16 training" - https://arxiv.org/abs/2010.06192
 # original impl - https://github.com/arogozhnikov/adamw_bfloat16
+# Kahan summation - https://en.wikipedia.org/wiki/Kahan_summation_algorithm
 
 import torch
 from torch.optim.optimizer import Optimizer
@@ -73,11 +74,39 @@ class BFF_Optimizer(Optimizer):
                     # Exponential moving average of squared gradient values
                     state['exp_avg_sq'] = torch.zeros_like(p, memory_format=torch.preserve_format)
                     
+                    # Kahan summation - accumulated error tracker
+                    state['compensation'] = torch.zeros_like(p, memory_format=torch.preserve_format)
+                    
 
                 exp_avgs.append(state['exp_avg'])
                 exp_avg_sqs.append(state['exp_avg_sq'])
 
                 state_steps.append(state['step'])
+                
+                grad = p.grad
+                state['exp_avg'].mul_(beta1).add_(grad, alpha=1 - beta1)
+                state['exp_avg_sq'].mul_(beta2).addcmul_(grad, grad.conj(), value=1 - beta2)
+                compensation = state['compensation']
+                
+                # update the steps for each param group update
+                state['step'] += 1
+                denom_correction = (1 - beta2 ** state['step']) ** 0.5
+
+                lr = group['lr_function'](state['step'])
+                
+                compensation.addcdiv_(
+                        state['exp_avg'],
+                        state['exp_avg_sq'].sqrt().add_(group['eps'], alpha=1),
+                        value=- lr * denom_correction,
+                    )
+                
+                # update compensation (Kahan summation)
+                buffer = p.clone()
+                p.add_(compensation)
+                compensation.add_(buffer.sub_(p))
+                
+                
+                    
 
             
             
