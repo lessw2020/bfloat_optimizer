@@ -12,8 +12,9 @@ class BFF_Optimizer(Optimizer):
     def __init__(
         self,
         params,
-        pure_mode=False,
-        optimizer_states16=True,
+        kahan_summation=False,
+        optimizer_states16=False,
+        stochastic_rounding=True,
         lr=1e-3,
         betas=(0.9, 0.999),
         eps=1e-8,
@@ -37,8 +38,9 @@ class BFF_Optimizer(Optimizer):
             betas=betas,
             eps=eps,
             weight_decay=weight_decay,
-            pure_mode=pure_mode,
+            kahan_summation=kahan_summation,
             optimizer_states16=optimizer_states16,
+            stochastic_rounding = stochastic_rounding,
         )
 
         super().__init__(params, defaults)
@@ -64,8 +66,9 @@ class BFF_Optimizer(Optimizer):
             lr = group["lr"]
             weight_decay = group["weight_decay"]
             eps = group["eps"]
-            pure_mode = group["pure_mode"]
+            kahan_summation = group["kahan_summation"]
             pure_state = group["optimizer_states16"]
+            stochastic_rounding = group["stochastic_rounding"]
 
             for p in group["params"]:
                 if p.grad is None:
@@ -78,7 +81,7 @@ class BFF_Optimizer(Optimizer):
 
                 # State initialization
                 if len(state) == 0:
-                    if pure_mode:
+                    if kahan_summation or stochastic_rounding:
                         assert (
                             p.dtype == torch.bfloat16
                         ), "BFF requires BFloat16 datatype"
@@ -100,7 +103,7 @@ class BFF_Optimizer(Optimizer):
                     )
 
                     # Kahan summation - accumulated error tracker
-                    if pure_mode:
+                    if kahan_summation:
                         state["compensation"] = torch.zeros_like(
                             p, memory_format=torch.preserve_format
                         )
@@ -130,7 +133,7 @@ class BFF_Optimizer(Optimizer):
                     grad, grad.conj(), value=1 - beta2
                 )
 
-                if pure_mode:
+                if kahan_summation:
                     compensation = state["compensation"]
 
                 # weight decay, AdamW style - todo - this differs from torch impl
@@ -140,7 +143,7 @@ class BFF_Optimizer(Optimizer):
                 denom_correction = (1 - beta2 ** state["step"]) ** 0.5
 
                 # lr update to compensation
-                if pure_mode:
+                if kahan_summation:
                     compensation.addcdiv_(
                         state["exp_avg"],
                         state["exp_avg_sq"].sqrt().add_(group["eps"], alpha=1),
@@ -149,7 +152,7 @@ class BFF_Optimizer(Optimizer):
 
                     # update weights with compensation (Kahan summation)
                     # save error back to compensation for next iteration
-                    if pure_mode:
+                    if kahan_summation:
                         buffer = p.clone()
                         p.add_(compensation)
                         compensation.add_(buffer.sub_(p))
