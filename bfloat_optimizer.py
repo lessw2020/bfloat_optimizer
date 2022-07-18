@@ -152,10 +152,10 @@ class BFF_Optimizer(Optimizer):
 
                     # update weights with compensation (Kahan summation)
                     # save error back to compensation for next iteration
-                    if kahan_summation:
-                        buffer = p.clone()
-                        p.add_(compensation)
-                        compensation.add_(buffer.sub_(p))
+                  
+                    buffer = p.clone()
+                    p.add_(compensation)
+                    compensation.add_(buffer.sub_(p))
 
                 else:
                     # if group['weight_decay'] != 0:
