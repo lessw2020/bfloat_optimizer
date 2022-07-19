@@ -12,13 +12,13 @@ class BFF_Optimizer(Optimizer):
     def __init__(
         self,
         params,
-        kahan_summation=False,
-        optimizer_states16=False,
-        stochastic_rounding=True,
         lr=1e-3,
         betas=(0.9, 0.999),
         eps=1e-8,
-        weight_decay=1e-2,
+        weight_decay=0.0,
+        enforce_bfloat_states=False,
+        kahan_summation=False,
+        stochastic_rounding=False,
     ):
 
         """
@@ -32,6 +32,10 @@ class BFF_Optimizer(Optimizer):
                     numerical stability (default: 1e-8)
                 weight_decay (float, optional): weight decay coefficient (default: 1e-2)
 
+                # BFF specific
+                enforce_bfloat_states = whether states for variance and momentum are forced to bfloat16.
+                If false, the datatype will mirror the weights in use.
+
         """
         defaults = dict(
             lr=lr,
@@ -39,8 +43,8 @@ class BFF_Optimizer(Optimizer):
             eps=eps,
             weight_decay=weight_decay,
             kahan_summation=kahan_summation,
-            optimizer_states16=optimizer_states16,
-            stochastic_rounding = stochastic_rounding,
+            enforce_bfloat16_states=enforce_bfloat_states,
+            stochastic_rounding=stochastic_rounding,
         )
 
         super().__init__(params, defaults)
@@ -67,7 +71,7 @@ class BFF_Optimizer(Optimizer):
             weight_decay = group["weight_decay"]
             eps = group["eps"]
             kahan_summation = group["kahan_summation"]
-            pure_state = group["optimizer_states16"]
+            enforce_bf16_states = group["enforce_bfloat16_states"]
             stochastic_rounding = group["stochastic_rounding"]
 
             for p in group["params"]:
@@ -81,6 +85,7 @@ class BFF_Optimizer(Optimizer):
 
                 # State initialization
                 if len(state) == 0:
+
                     if kahan_summation or stochastic_rounding:
                         assert (
                             p.dtype == torch.bfloat16
@@ -88,35 +93,41 @@ class BFF_Optimizer(Optimizer):
 
                     state["step"] = torch.tensor(0.0)
 
+                    # handle what state dtype should be...if enforced, we set to bf16 else we match the weights
+                    state_dtype = p.dtype
+
+                    if enforce_bf16_states:
+                        state_dtype = torch.bfloat16
+                        # print(f"BFF state dtype set to torch.bfloat16")
+
                     # Exponential moving average of gradient values
                     state["exp_avg"] = torch.zeros_like(
                         p,
                         memory_format=torch.preserve_format,
-                        dtype=torch.bfloat16,
+                        dtype=state_dtype,
                     )
 
                     # Exponential moving average of squared gradient values
                     state["exp_avg_sq"] = torch.zeros_like(
                         p,
                         memory_format=torch.preserve_format,
-                        dtype=torch.bfloat16,
+                        dtype=state_dtype,
                     )
 
                     # Kahan summation - accumulated error tracker
+                    # enforce bfloat16 no matter what
                     if kahan_summation:
                         state["compensation"] = torch.zeros_like(
-                            p, memory_format=torch.preserve_format
+                            p, memory_format=torch.preserve_format, dtype=torch.bfloat16
                         )
 
                 # main processing
 
                 # update the steps for each param group update
                 state["step"] += 1
+                step = state["step"]
 
                 grad = p.grad
-                # exp_avg = state["exp_avg"]
-
-                # exp_avg_sq = state["exp_avg_sq"]
 
                 # Decay the first and second moment running average coefficient
                 """exp_avg.mul_(beta1).add_(1 - beta1, grad)
@@ -127,11 +138,12 @@ class BFF_Optimizer(Optimizer):
                 bias_correction1 = 1 - beta1 ** state["step"]
                 bias_correction2 = 1 - beta2 ** state["step"]
                 """
+                exp_avg = state["exp_avg"]
+                exp_avg_sq = state["exp_avg_sq"]
 
-                state["exp_avg"].mul_(beta1).add_(grad, alpha=1 - beta1)
-                state["exp_avg_sq"].mul_(beta2).addcmul_(
-                    grad, grad.conj(), value=1 - beta2
-                )
+                exp_avg.mul_(beta1).add_(grad, alpha=1 - beta1)
+
+                exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
 
                 if kahan_summation:
                     compensation = state["compensation"]
@@ -140,31 +152,26 @@ class BFF_Optimizer(Optimizer):
                 if weight_decay:
                     p.data.mul_(1 - lr * weight_decay)
 
-                denom_correction = (1 - beta2 ** state["step"]) ** 0.5
+                denom_correction = (1 - beta2**step) ** 0.5
 
                 # lr update to compensation
                 if kahan_summation:
                     compensation.addcdiv_(
-                        state["exp_avg"],
-                        state["exp_avg_sq"].sqrt().add_(group["eps"], alpha=1),
+                        exp_avg,
+                        exp_avg_sq.sqrt().add_(eps, alpha=1),
                         value=-lr * denom_correction,
                     )
 
                     # update weights with compensation (Kahan summation)
                     # save error back to compensation for next iteration
-                  
                     buffer = p.clone()
                     p.add_(compensation)
                     compensation.add_(buffer.sub_(p))
 
                 else:
-                    # if group['weight_decay'] != 0:
-                    #    grad.add_(group['weight_decay'], p.data)
-                    # step_size = lr * math.sqrt(bias_correction2) / bias_correction1
-
-                    # p.data.addcdiv_(-step_size, exp_avg, denom)
+                    # standard update
                     p.data.addcdiv_(
-                        state["exp_avg"],
-                        state["exp_avg_sq"].sqrt().add_(group["eps"], alpha=1),
+                        exp_avg,
+                        exp_avg_sq.sqrt().add_(eps, alpha=1),
                         value=-lr * denom_correction,
                     )
