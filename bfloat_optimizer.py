@@ -157,7 +157,7 @@ class BFF_Optimizer(Optimizer):
                 if use_kahan_summation:
                     compensation = state["compensation"]
 
-                    compensation.addcdiv_(exp_avg, centered_variance, -step_size)
+                    compensation.addcdiv_(exp_avg, centered_variance, value=-step_size)
 
                     # update weights with compensation (Kahan summation)
                     # save error back to compensation for next iteration
@@ -167,4 +167,4 @@ class BFF_Optimizer(Optimizer):
 
                 else:
                     # usual AdamW updates
-                    p.data.addcdiv_(exp_avg, centered_variance, -step_size)
+                    p.data.addcdiv_(exp_avg, centered_variance, value=-step_size)
