@@ -2,10 +2,6 @@
 # momentum, variance and auxiliary compensation buffer
 # we use Kahan summarization to offset the Bfloat16 precision reduction, allowing full training in BFloat16.
 
-# paper credit - "Revisiting Bfloat16 training" - https://arxiv.org/abs/2010.06192
-# original inspiration - https://github.com/arogozhnikov/adamw_bfloat16
-# Kahan summation - https://en.wikipedia.org/wiki/Kahan_summation_algorithm
-
 import torch
 from torch.optim.optimizer import Optimizer
 
@@ -97,24 +93,19 @@ class BFF_Optimizer(Optimizer):
                 # State initialization
                 if len(state) == 0:
 
-                    # if use_kahan_summation:
-                    #    assert (
-                    #       p.dtype == torch.bfloat16
-                    #    ), "BFF recommends BFloat16 datatype"
-
                     state["step"] = torch.tensor(0.0)
 
                     # todo - add match weights option...for now let user select
-                    param_dtype = p.dtype
+                    # param_dtype = p.dtype
 
-                    # EMA of gradient values
+                    # momentum - EMA of gradient values
                     state["exp_avg"] = torch.zeros_like(
                         p,
                         memory_format=torch.preserve_format,
                         dtype=momentum_dtype,
                     )
 
-                    # EMA of squared gradient values
+                    # variance uncentered - EMA of squared gradient values
                     state["exp_avg_sq"] = torch.zeros_like(
                         p,
                         memory_format=torch.preserve_format,
@@ -135,39 +126,14 @@ class BFF_Optimizer(Optimizer):
                 state["step"] += 1
                 step = state["step"]
 
+                exp_avg = state["exp_avg"]
+                exp_avg_sq = state["exp_avg_sq"]
+
                 grad = p.grad
 
                 # weight decay, AdamW style
                 if weight_decay:
                     p.data.mul_(1 - lr * weight_decay)
-
-                # Decay the first and second moment running average coefficient
-                exp_avg.mul_(beta1).add_(grad, alpha=1 - beta1)
-                exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
-
-                bias_correction1 = 1 - beta1**step
-                bias_correction2 = 1 - beta2**step
-
-                step_size = lr / bias_correction1
-
-                bias_correction2_sqrt = (bias_correction2) ** 0.5
-
-                if use_kahan_summation:
-                    compensation.addcdiv_(
-                        exp_avg,
-                    )
-
-                # Decay the first and second moment running average coefficient
-                """exp_avg.mul_(beta1).add_(1 - beta1, grad)
-                exp_avg_sq.mul_(beta2).addcmul_(1 - beta2, grad, grad)
-
-                denom = exp_avg_sq.sqrt().add_(group["eps"])
-
-                bias_correction1 = 1 - beta1 ** state["step"]
-                bias_correction2 = 1 - beta2 ** state["step"]
-                """
-                exp_avg = state["exp_avg"]
-                exp_avg_sq = state["exp_avg_sq"]
 
                 # update momentum
                 exp_avg.mul_(beta1).add_(grad, alpha=1 - beta1)
@@ -175,14 +141,12 @@ class BFF_Optimizer(Optimizer):
                 # update uncentered variance
                 exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
 
-                if use_kahan_summation:
-                    compensation = state["compensation"]
-
+                # adjust using bias1
                 bias_correction1 = 1 - beta1**step
-
                 step_size = lr / bias_correction1
 
-                denom_correction = (1 - beta2**step) ** 0.5  #avoids math import
+                # adjust using bias2
+                denom_correction = (1 - beta2**step) ** 0.5  # avoids math import
 
                 centered_variance = (exp_avg_sq.sqrt() / denom_correction).add_(
                     eps, alpha=1
@@ -191,6 +155,8 @@ class BFF_Optimizer(Optimizer):
 
                 # lr update to compensation
                 if use_kahan_summation:
+                    compensation = state["compensation"]
+
                     compensation.addcdiv_(exp_avg, centered_variance, -step_size)
 
                     # update weights with compensation (Kahan summation)
