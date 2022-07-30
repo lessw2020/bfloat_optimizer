@@ -178,13 +178,20 @@ class BFF_Optimizer(Optimizer):
                 if use_kahan_summation:
                     compensation = state["compensation"]
 
-                denom_correction = (1 - beta2**step) ** 0.5
-                centered_variance = exp_avg_sq.sqrt().add_(eps, alpha=1)
-                step_adjustment = -lr * denom_correction
+                bias_correction1 = 1 - beta1**step
+
+                step_size = lr / bias_correction1
+
+                denom_correction = (1 - beta2**step) ** 0.5  #avoids math import
+
+                centered_variance = (exp_avg_sq.sqrt() / denom_correction).add_(
+                    eps, alpha=1
+                )
+                # step_adjustment = -step_size * denom_correction
 
                 # lr update to compensation
                 if use_kahan_summation:
-                    compensation.addcdiv_(exp_avg, centered_variance, step_adjustment)
+                    compensation.addcdiv_(exp_avg, centered_variance, -step_size)
 
                     # update weights with compensation (Kahan summation)
                     # save error back to compensation for next iteration
@@ -194,4 +201,4 @@ class BFF_Optimizer(Optimizer):
 
                 else:
                     # usual updates
-                    p.data.addcdiv_(exp_avg, centered_variance, step_adjustment)
+                    p.data.addcdiv_(exp_avg, centered_variance, -step_size)
