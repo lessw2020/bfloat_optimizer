@@ -1,4 +1,6 @@
-# BFF_Optimizer: a pure Bfloat16 optimizer - basic idea is we use Kahan summarization to offset the Bfloat16 precision reduction, allowing full training in BFloat16.
+# BFF_Optimizer: a pure Bfloat16 AdamW optimizer with optional Kahan summation and direct control over
+# momentum, variance and auxiliary compensation buffer
+# we use Kahan summarization to offset the Bfloat16 precision reduction, allowing full training in BFloat16.
 
 # paper credit - "Revisiting Bfloat16 training" - https://arxiv.org/abs/2010.06192
 # original inspiration - https://github.com/arogozhnikov/adamw_bfloat16
@@ -16,11 +18,12 @@ class BFF_Optimizer(Optimizer):
         betas=(0.9, 0.999),
         eps=1e-8,
         weight_decay=0.0,
-        enforce_bfloat_states=False,
-        kahan_summation=False,
-        stochastic_rounding=False,
+        use_kahan_summation=True,
+        # use_matching_params_dtype=False,
+        momentum_dtype = torch.bfloat16,
+        variance_dtype=torch.bfloat16,
+        compensation_buffer_dtype = torch.bfloat16,
     ):
-
         """
         Args:
                 params (iterable): iterable of parameters to optimize or dicts defining
@@ -33,8 +36,12 @@ class BFF_Optimizer(Optimizer):
                 weight_decay (float, optional): weight decay coefficient (default: 1e-2)
 
                 # BFF specific
-                enforce_bfloat_states = whether states for variance and momentum are forced to bfloat16.
-                If false, the datatype will mirror the weights in use.
+                use_kahan_summation = creates auxiliary buffer to ensure high precision model param updates
+                # use_matching_params_dtype = should the optimizer use the same dtype as model params? True = regular AdamW
+                momentum_dtype = dtype for momentum
+                variance_dtype = dtype for uncentered variance
+                compensation_buffer_dtype = dtype for Kahan summation buffer
+
 
         """
         defaults = dict(
@@ -42,9 +49,10 @@ class BFF_Optimizer(Optimizer):
             betas=betas,
             eps=eps,
             weight_decay=weight_decay,
-            kahan_summation=kahan_summation,
-            enforce_bfloat16_states=enforce_bfloat_states,
-            stochastic_rounding=stochastic_rounding,
+            use_kahan_summation=use_kahan_summation,
+            momentum_dtype = momentum_dtype,
+            variance_dtype = variance_dtype,
+            compensation_buffer_dtype = compensation_buffer_dtype
         )
 
         super().__init__(params, defaults)
@@ -70,9 +78,12 @@ class BFF_Optimizer(Optimizer):
             lr = group["lr"]
             weight_decay = group["weight_decay"]
             eps = group["eps"]
-            kahan_summation = group["kahan_summation"]
-            enforce_bf16_states = group["enforce_bfloat16_states"]
-            stochastic_rounding = group["stochastic_rounding"]
+            # BFF specifics
+            use_kahan_summation = group["use_kahan_summation"]
+
+            momentum_dtype = group["momentum_dtype"]
+            variance_dtype = group["variance_dtype"]
+            compensation_buffer_dtype=group["compensation_buffer_dtype"]
 
             for p in group["params"]:
                 if p.grad is None:
@@ -86,39 +97,35 @@ class BFF_Optimizer(Optimizer):
                 # State initialization
                 if len(state) == 0:
 
-                    if kahan_summation or stochastic_rounding:
-                        assert (
-                            p.dtype == torch.bfloat16
-                        ), "BFF requires BFloat16 datatype"
+                    #if use_kahan_summation:
+                    #    assert (
+                    #       p.dtype == torch.bfloat16
+                    #    ), "BFF recommends BFloat16 datatype"
 
                     state["step"] = torch.tensor(0.0)
 
-                    # handle what state dtype should be...if enforced, we set to bf16 else we match the weights
-                    state_dtype = p.dtype
+                    # todo - add match weights option...for now let user select
+                    param_dtype = p.dtype
 
-                    if enforce_bf16_states:
-                        state_dtype = torch.bfloat16
-                        # print(f"BFF state dtype set to torch.bfloat16")
-
-                    # Exponential moving average of gradient values
+                    # EMA of gradient values
                     state["exp_avg"] = torch.zeros_like(
                         p,
                         memory_format=torch.preserve_format,
-                        dtype=state_dtype,
+                        dtype=momentum_dtype,
                     )
 
-                    # Exponential moving average of squared gradient values
+                    # EMA of squared gradient values
                     state["exp_avg_sq"] = torch.zeros_like(
                         p,
                         memory_format=torch.preserve_format,
-                        dtype=state_dtype,
+                        dtype=variance_dtype,
                     )
 
-                    # Kahan summation - accumulated error tracker
-                    # enforce bfloat16 no matter what
-                    if kahan_summation:
+                    # optional Kahan summation - accumulated error tracker
+                    if use_kahan_summation:
                         state["compensation"] = torch.zeros_like(
-                            p, memory_format=torch.preserve_format, dtype=torch.bfloat16
+                            p, memory_format=torch.preserve_format, 
+                            dtype=compensation_buffer_dtype
                         )
 
                 # main processing
