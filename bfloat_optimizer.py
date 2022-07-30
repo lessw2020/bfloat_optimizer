@@ -1,6 +1,6 @@
 # BFF_Optimizer: a pure Bfloat16 AdamW optimizer with optional Kahan summation and direct control over
 # momentum, variance and auxiliary compensation buffer
-# we use Kahan summarization to offset the Bfloat16 precision reduction, allowing full training in BFloat16.
+# we use Kahan summation to offset the Bfloat16 precision reduction, allowing full training in BFloat16.
 
 import torch
 from torch.optim.optimizer import Optimizer
@@ -166,5 +166,5 @@ class BFF_Optimizer(Optimizer):
                     compensation.add_(temp_buffer.sub_(p.data))
 
                 else:
-                    # usual updates
+                    # usual AdamW updates
                     p.data.addcdiv_(exp_avg, centered_variance, -step_size)
