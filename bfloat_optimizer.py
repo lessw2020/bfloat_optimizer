@@ -20,9 +20,9 @@ class BFF_Optimizer(Optimizer):
         weight_decay=0.0,
         use_kahan_summation=True,
         # use_matching_params_dtype=False,
-        momentum_dtype = torch.bfloat16,
+        momentum_dtype=torch.bfloat16,
         variance_dtype=torch.bfloat16,
-        compensation_buffer_dtype = torch.bfloat16,
+        compensation_buffer_dtype=torch.bfloat16,
     ):
         """
         Args:
@@ -50,9 +50,9 @@ class BFF_Optimizer(Optimizer):
             eps=eps,
             weight_decay=weight_decay,
             use_kahan_summation=use_kahan_summation,
-            momentum_dtype = momentum_dtype,
-            variance_dtype = variance_dtype,
-            compensation_buffer_dtype = compensation_buffer_dtype
+            momentum_dtype=momentum_dtype,
+            variance_dtype=variance_dtype,
+            compensation_buffer_dtype=compensation_buffer_dtype,
         )
 
         super().__init__(params, defaults)
@@ -83,7 +83,7 @@ class BFF_Optimizer(Optimizer):
 
             momentum_dtype = group["momentum_dtype"]
             variance_dtype = group["variance_dtype"]
-            compensation_buffer_dtype=group["compensation_buffer_dtype"]
+            compensation_buffer_dtype = group["compensation_buffer_dtype"]
 
             for p in group["params"]:
                 if p.grad is None:
@@ -97,7 +97,7 @@ class BFF_Optimizer(Optimizer):
                 # State initialization
                 if len(state) == 0:
 
-                    #if use_kahan_summation:
+                    # if use_kahan_summation:
                     #    assert (
                     #       p.dtype == torch.bfloat16
                     #    ), "BFF recommends BFloat16 datatype"
@@ -124,17 +124,38 @@ class BFF_Optimizer(Optimizer):
                     # optional Kahan summation - accumulated error tracker
                     if use_kahan_summation:
                         state["compensation"] = torch.zeros_like(
-                            p, memory_format=torch.preserve_format, 
-                            dtype=compensation_buffer_dtype
+                            p,
+                            memory_format=torch.preserve_format,
+                            dtype=compensation_buffer_dtype,
                         )
 
-                # main processing
+                # main processing -------------------------
 
                 # update the steps for each param group update
                 state["step"] += 1
                 step = state["step"]
 
                 grad = p.grad
+
+                # weight decay, AdamW style
+                if weight_decay:
+                    p.data.mul_(1 - lr * weight_decay)
+
+                # Decay the first and second moment running average coefficient
+                exp_avg.mul_(beta1).add_(grad, alpha=1 - beta1)
+                exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
+
+                bias_correction1 = 1 - beta1**step
+                bias_correction2 = 1 - beta2**step
+
+                step_size = lr / bias_correction1
+
+                bias_correction2_sqrt = (bias_correction2) ** 0.5
+
+                if use_kahan_summation:
+                    compensation.addcdiv_(
+                        exp_avg,
+                    )
 
                 # Decay the first and second moment running average coefficient
                 """exp_avg.mul_(beta1).add_(1 - beta1, grad)
@@ -148,37 +169,29 @@ class BFF_Optimizer(Optimizer):
                 exp_avg = state["exp_avg"]
                 exp_avg_sq = state["exp_avg_sq"]
 
+                # update momentum
                 exp_avg.mul_(beta1).add_(grad, alpha=1 - beta1)
 
+                # update uncentered variance
                 exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
 
-                if kahan_summation:
+                if use_kahan_summation:
                     compensation = state["compensation"]
 
-                # weight decay, AdamW style - todo - this differs from torch impl
-                if weight_decay:
-                    p.data.mul_(1 - lr * weight_decay)
-
                 denom_correction = (1 - beta2**step) ** 0.5
+                centered_variance = exp_avg_sq.sqrt().add_(eps, alpha=1)
+                step_adjustment = -lr * denom_correction
 
                 # lr update to compensation
-                if kahan_summation:
-                    compensation.addcdiv_(
-                        exp_avg,
-                        exp_avg_sq.sqrt().add_(eps, alpha=1),
-                        value=-lr * denom_correction,
-                    )
+                if use_kahan_summation:
+                    compensation.addcdiv_(exp_avg, centered_variance, step_adjustment)
 
                     # update weights with compensation (Kahan summation)
                     # save error back to compensation for next iteration
-                    buffer = p.clone()
-                    p.add_(compensation)
-                    compensation.add_(buffer.sub_(p))
+                    temp_buffer = p.clone()
+                    p.data.add_(compensation)
+                    compensation.add_(temp_buffer.sub_(p.data))
 
                 else:
-                    # standard update
-                    p.data.addcdiv_(
-                        exp_avg,
-                        exp_avg_sq.sqrt().add_(eps, alpha=1),
-                        value=-lr * denom_correction,
-                    )
+                    # usual updates
+                    p.data.addcdiv_(exp_avg, centered_variance, step_adjustment)
