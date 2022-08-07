@@ -5,10 +5,11 @@
 # LICENSE file in the root directory of this source tree.
 
 # BFF_Optimizer: a pure Bfloat16 AdamW optimizer with optional Kahan summation
-# Features direct control over momentum, variance and auxiliary compensation
+# Allows direct control over momentum, variance and auxiliary compensation
 # buffer dtypes.
-# Kahan summation is used to offset Bfloat16 precision reduction for
-# the weight updates, allowing full training in BFloat16.
+# Optional Kahan summation is used to offset Bfloat16 precision reduction for
+# the weight updates. This allows full training in BFloat16 (with equal or
+# better than FP32 results) due to high precision weight upates.
 
 import torch
 from torch.optim.optimizer import Optimizer
@@ -110,9 +111,6 @@ class BFF_AdamW(Optimizer):
 
                     state["step"] = torch.tensor(0.0)
 
-                    # todo - add match weights option...for now let user select
-                    # param_dtype = p.dtype
-
                     # momentum - EMA of gradient values
                     state["exp_avg"] = torch.zeros_like(
                         p,
@@ -158,6 +156,7 @@ class BFF_AdamW(Optimizer):
 
                 # adjust using bias1
                 bias_correction1 = 1 - beta1**step
+
                 step_size = lr / bias_correction1
 
                 # adjust using bias2
@@ -166,7 +165,6 @@ class BFF_AdamW(Optimizer):
                 centered_variance = (exp_avg_sq.sqrt() / denom_correction).add_(
                     eps, alpha=1
                 )
-                # step_adjustment = -step_size * denom_correction
 
                 # lr update to compensation
                 if use_kahan_summation:
